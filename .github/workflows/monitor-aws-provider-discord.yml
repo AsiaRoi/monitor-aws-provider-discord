@@ -45,20 +45,6 @@ jobs:
             echo "No new version"
             echo "NEW_RELEASE=false" >> $GITHUB_OUTPUT
           fi
-      - name: Check changelog for CloudFront/ALB
-        id: check-changelog
-        if: steps.compare.outputs.NEW_RELEASE == 'true'
-        run: |
-          CHANGELOG=$(curl -s https://api.github.com/repos/hashicorp/terraform-provider-aws/releases/latest | jq -r '.body' || echo "error")
-          if [ "$CHANGELOG" = "error" ]; then
-            echo "Error fetching changelog"
-            exit 1
-          fi
-          if echo "$CHANGELOG" | grep -i "CloudFront\|ALB\|origin\|403\|deployment"; then
-            echo "RELEVANT_CHANGES=true" >> $GITHUB_OUTPUT
-          else
-            echo "RELEVANT_CHANGES=false" >> $GITHUB_OUTPUT
-          fi
       - name: Send Discord notification
         if: steps.compare.outputs.NEW_RELEASE == 'true'
         env:
@@ -67,9 +53,6 @@ jobs:
           LATEST_VERSION=${{ steps.get-release.outputs.LATEST_VERSION }}
           CHANGELOG_URL="https://github.com/hashicorp/terraform-provider-aws/releases/tag/$LATEST_VERSION"
           MESSAGE="New AWS Terraform provider version: $LATEST_VERSION\nChangelog: $CHANGELOG_URL"
-          if [ "${{ steps.check-changelog.outputs.RELEVANT_CHANGES }}" == "true" ]; then
-            MESSAGE="$MESSAGE\n🚨 Potential fix for CloudFront 403 errors or deployment delays!"
-          fi
           RESPONSE=$(curl -s -X POST -H 'Content-Type: application/json' \
           -d "{\"content\":\"$MESSAGE\"}" $DISCORD_WEBHOOK_URL || echo "error")
           if [ "$RESPONSE" = "error" ]; then
