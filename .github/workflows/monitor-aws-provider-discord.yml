@@ -1,0 +1,78 @@
+name: Monitor AWS Provider Releases for Discord
+on:
+  schedule:
+    - cron: '0 0 * * 1' # Run weekly on Monday at 00:00 UTC
+  workflow_dispatch: # Allow manual trigger
+jobs:
+  check-releases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      - name: Set up prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq
+      - name: Fetch latest AWS provider release
+        id: get-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GH_TOKEN }} # Optional: For higher API rate limits
+        run: |
+          if [ -n "$GITHUB_TOKEN" ]; then
+            CURL_HEADER="-H 'Authorization: token $GITHUB_TOKEN'"
+          else
+            CURL_HEADER=""
+          fi
+          LATEST_VERSION=$(curl -s $CURL_HEADER https://api.github.com/repos/hashicorp/terraform-provider-aws/releases/latest | jq -r '.tag_name' || echo "error")
+          if [ "$LATEST_VERSION" = "error" ]; then
+            echo "Error fetching release"
+            exit 1
+          fi
+          echo "Latest AWS provider version: $LATEST_VERSION"
+          echo "LATEST_VERSION=$LATEST_VERSION" >> $GITHUB_OUTPUT
+      - name: Compare with current version
+        id: compare
+        run: |
+          CURRENT_VERSION=$(grep 'version' terraform.tf | grep 'aws' | grep -o '[0-9]\.[0-9]\{1,2\}\.[0-9]' || echo "unknown")
+          if [ "$CURRENT_VERSION" = "unknown" ]; then
+            echo "Warning: Could not find current AWS provider version in terraform.tf"
+            CURRENT_VERSION="5.40.0" # Fallback version; update as needed
+          fi
+          if [ "$CURRENT_VERSION" != "${{ steps.get-release.outputs.LATEST_VERSION }}" ]; then
+            echo "New version detected: ${{ steps.get-release.outputs.LATEST_VERSION }} (current: $CURRENT_VERSION)"
+            echo "NEW_RELEASE=true" >> $GITHUB_OUTPUT
+          else
+            echo "No new version"
+            echo "NEW_RELEASE=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Check changelog for CloudFront/ALB
+        id: check-changelog
+        if: steps.compare.outputs.NEW_RELEASE == 'true'
+        run: |
+          CHANGELOG=$(curl -s https://api.github.com/repos/hashicorp/terraform-provider-aws/releases/latest | jq -r '.body' || echo "error")
+          if [ "$CHANGELOG" = "error" ]; then
+            echo "Error fetching changelog"
+            exit 1
+          fi
+          if echo "$CHANGELOG" | grep -i "CloudFront\|ALB\|origin\|403\|deployment"; then
+            echo "RELEVANT_CHANGES=true" >> $GITHUB_OUTPUT
+          else
+            echo "RELEVANT_CHANGES=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Send Discord notification
+        if: steps.compare.outputs.NEW_RELEASE == 'true'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          LATEST_VERSION=${{ steps.get-release.outputs.LATEST_VERSION }}
+          CHANGELOG_URL="https://github.com/hashicorp/terraform-provider-aws/releases/tag/$LATEST_VERSION"
+          MESSAGE="New AWS Terraform provider version: $LATEST_VERSION\nChangelog: $CHANGELOG_URL\nCheck for CloudFront/ALB fixes!"
+          if [ "${{ steps.check-changelog.outputs.RELEVANT_CHANGES }}" == "true" ]; then
+            MESSAGE="$MESSAGE\n🚨 Potential fix for CloudFront 403 errors or deployment delays!"
+          fi
+          RESPONSE=$(curl -s -X POST -H 'Content-Type: application/json' \
+          -d "{\"content\":\"$MESSAGE\"}" $DISCORD_WEBHOOK_URL || echo "error")
+          if [ "$RESPONSE" = "error" ]; then
+            echo "Error sending Discord notification"
+            exit 1
+          fi
